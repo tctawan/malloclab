@@ -710,6 +710,7 @@ static double eval_mm_util(trace_t *trace, int tracenum, range_t **ranges)
     if (mm_init() < 0)
 	app_error("mm_init failed in eval_mm_util");
 
+
     for (i = 0;  i < trace->num_ops;  i++) {
         switch (trace->ops[i].type) {
 
