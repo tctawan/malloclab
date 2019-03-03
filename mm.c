@@ -112,8 +112,9 @@ int mm_init(void)
 }
 
 /*
-    Expand the heap by "words" words 
-    and return a pointer to the payload of the new area.
+    Expand the heap by "words" words and return a pointer to the payload of the new area.
+    Request for more memmory -> set new free block -> coalesce with free block at the end ->
+    move the epilogue.
 */
 void *expand_heap(size_t words){
     // Calculate bytes of 8 bytes-aligned words
@@ -135,9 +136,9 @@ void *expand_heap(size_t words){
 }
 
 /*
-    Using the block pointer, first coalesce the free blocks then 
-    redirecting the pointer. Returns the pointer to the payload of 
-    the coalesced block.
+    Take in a block pointer returns a block pointer to the coalesced block.
+    Check next and prev block allocate flag -> splice the block (if needed) ->
+    linked the joined block to the root.
 */
 void *coalesce(void *bp){
     int prev_alloc = GET_ALLOC(HDRP(PREV_BLK(bp)));
@@ -194,22 +195,26 @@ void *coalesce(void *bp){
 }
 
 /**
- * Using the block pointer, insert the joined block to the linked list
+ * Takes a block pointer of the "unlinked" free block and returns the same block pointer.
+ * Connect SUCC to root's SUCC and PRED to root -> Connect root's SUCC to bp -> 
+ * Connect succ's PRED to bp (if succ exist).
 */
 void *link_to_root(void *bp){
 
     PUT_ADDR(SUCC(bp),GET_ADDR(SUCC(root))); // connect succ of current block to the succ of root.
     PUT_ADDR(PRED(bp), root);// connect pred of current block to root.
-    if(GET_ADDR(SUCC(bp)) != NULL){
-        PUT_ADDR(PRED(GET_ADDR(SUCC(bp))), bp); // if exist, connect the pred of current block succ to current block.
-    }
     PUT_ADDR(SUCC(root), bp);// connect succ of root to current block
+
+    if(GET_ADDR(SUCC(bp)) != NULL){
+        // if exist, connect the pred of current block succ to current block.
+        PUT_ADDR(PRED(GET_ADDR(SUCC(bp))), bp); 
+    }
 
     return bp;
 }
 
 /**
- * Using the block pointer, splice the block.
+ * Takes a block pointer to block in the linked list and splice it (free the block from linked list).
 */
 void splice(void *bp){
     if(GET_ADDR(PRED(bp)) != NULL){
@@ -225,55 +230,64 @@ void splice(void *bp){
 
 /* 
  * mm_malloc - Allocate a block of "size+DSIZE*2" bytes by first finding best-fit
- * block. Looking though the linked-list of free blocks,if the block fits perfectly
- * in the best-fit block, we just assigned it.
- * Else we split the block into allocated and free blocks and redirect pointers. 
- * If no such block exist,we expands the heap size by "size+DSIZE" bytes.
- * Returns block pointer.
+ * block. If there is no available block, expands the heap. Returns the block pointer of the
+ * allocated block.
  * 
  * NOTE: The block must be 8-aligned.
  */
 void *mm_malloc(size_t size)
 
 {
-    size_t asize = ALIGN(size) + DSIZE*2; //Aligned size + hrd + ftr + pred + succ
+    size_t asize = ALIGN(size) + DSIZE*2; // Aligned-size + hrd + ftr + pred + succ
     void *bfp = find(asize); // Find best-fit block and assigned the pointer to payload to bfp.
+    
     /**
-     * Check if big enough block exist. If it doesnt, expand the heap.
+     * If there is no available blcok, expand the heap so that the last block is 
+     * big enough for asize.
     */
-
-
     if (bfp == NULL){
         // Get size from footer of last block. If last block is not free, set last_block_size to 0.
         size_t last_block_size = GET_ALLOC(epilogue-WSIZE) == 0 ? GET_SIZE(epilogue - WSIZE): 0;
+
         bfp = expand_heap((asize-last_block_size)/WSIZE);
     }
 
-    /*
-     * Once we have a big enough block, we assigned header and footer .
-     * If block doesn't fit perfectly we split the block into allocated
-     * and free blocks, both with hdr and ftr.
-    */
+    /**
+     * Once we found a big enough block, we calculate for the remainder .
+     * If there is no remainder, the block fits perfectly and we splice it.
+     * 
+     * If there is remainder,we make sure that the free block is a valid block (24 bytes). 
+     * If the free space is not a valid block, we allocate it .
+     * 
+     * We then update the header and footer. 
+     * 
+     * After the update, if there is a free block, we update the header and footer of free block.
+     * Then connect the SUCC & PRED of free block to SUCC & PRED of bfp.
+     * Then connect the succ's PRED to free block ( if succ exist ) and
+     * connect the pred's SUCC to free block (if pred exist).
+     */
 
     size_t remaining = GET_SIZE(HDRP(bfp)) - asize;
 
     /**
-     * This makes sure that the free space is still a valid block
+     * If the remainder is not a valid block, just allocate the remainder as well.
      * (contains header,payload,pred,succ,footer).
      */
     if(remaining < 24 && remaining > 0){
-            void *bp = expand_heap((24-remaining)/WSIZE);
-            remaining = GET_SIZE(HDRP(bp)) - asize;
+            asize = GET_SIZE(HDRP(bfp)); 
+            remaining = 0;
     }
 
     // Rewrite the header and footer with new block size.
     PUT(HDRP(bfp), PACK(asize,1));
     PUT(FTRP(bfp), PACK(asize,1));
 
-    if(remaining != 0){ // Check if there any free space
+    if(remaining != 0){
+
         // Create hdr and ftr for free block
         PUT(HDRP(NEXT_BLK(bfp)), PACK(remaining, 0));
         PUT(FTRP(NEXT_BLK(bfp)), PACK(remaining,0));
+        
         // Re-link pred and succ to the remaining free block.
         PUT(PRED(NEXT_BLK(bfp)), GET_ADDR(PRED(bfp)));
         PUT(SUCC(NEXT_BLK(bfp)), GET_ADDR(SUCC(bfp)));
@@ -300,12 +314,11 @@ void *mm_malloc(size_t size)
  * Find the best-fit block of size "asize" bytes. Returns
  * a pointer to the start of payload.
 */
-
 void *find(size_t asize){
     void *bp = GET_ADDR(SUCC(root));//Frist free payload 
     void *bfp = NULL; // Payload of best-fit block
 
-    //Find best-fit block by looping till epilogue
+    //Find best-fit block by looping till no more free block
     while(bp != NULL){
         if(GET_SIZE(HDRP(bp)) >= asize){ // Check big enough
             if(bfp == NULL || GET_SIZE(HDRP(bp)) < GET_SIZE(HDRP(bfp))){ // Check if the block is smaller than current best
