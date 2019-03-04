@@ -3,4 +3,4 @@
 make clean\
 && make\
 &&
-gdb --args ./mdriver -f short1-bal.rep -V
+gdb --args ./mdriver -V 

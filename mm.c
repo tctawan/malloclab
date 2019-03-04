@@ -14,6 +14,7 @@
 #include <assert.h>
 #include <unistd.h>
 #include <string.h>
+#include <math.h>
 
 #include "mm.h"
 #include "memlib.h"
@@ -51,6 +52,8 @@ team_t team = {
 #define GET_SIZE(p) (GET(p) & ~7)
 #define GET_ALLOC(p) (GET(p) & 1)
 
+#define GET_START(bucket_num) (bucket[bucket_num])
+
 // bp points to the start of a payload
 // cast it so that we can do pointer arithmatic
 // NOTE: If size of block is changed, change the header before footer.
@@ -79,31 +82,37 @@ void *mm_realloc(void *ptr, size_t size);
 void mm_check();
 void splice(void* bp);
 void *find(size_t asize);
+int get_bucket(size_t size);
+void put_bucket(int bucket_num, void *bp);
 
-void *root; // root pointer
+void *prologue; // root pointer
 void *epilogue;// epilogue pointer
+void *bucket[64]; // buckets that keep bp of free block of that size class.
 
 /* 
  * mm_init - initialize the malloc package.
  */
 int mm_init(void)
 {
-    root = mem_sbrk(DSIZE * 4);
-    if(root == (void *)-1){
+    prologue = mem_sbrk(DSIZE * 4);
+    if(prologue == (void *)-1){
         return -1;
     }
 
+    memset(bucket, NULL, sizeof bucket);
+
     //create padding , prologue, epilogue
-    PUT(root, 0);
-    PUT(root+ WSIZE,PACK(WSIZE*6,1));
-    PUT(root + WSIZE*2, NULL);
-    PUT(root + WSIZE*3, NULL);
-    PUT(root + WSIZE*4, 1);// dummy payload
-    PUT(root + WSIZE*5, 1);
-    PUT(root + WSIZE*6, PACK(WSIZE*6,1));
-    PUT(root + WSIZE*7, PACK(0,1));
-    epilogue = root+WSIZE*7;
-    root += WSIZE*4;
+    PUT(prologue, 0);
+    PUT(prologue+ WSIZE,PACK(WSIZE*6,1));
+    PUT(prologue + WSIZE*2, NULL);
+    PUT(prologue + WSIZE*3, NULL);
+    PUT(prologue + WSIZE*4, 1);// dummy payload
+    PUT(prologue + WSIZE*5, 1);
+    PUT(prologue + WSIZE*6, PACK(WSIZE*6,1));
+    PUT(prologue + WSIZE*7, PACK(0,1));
+    epilogue = prologue+WSIZE*7;
+    prologue += WSIZE*4;
+
     //create a free block in the empty heap
     void *bp = expand_heap(INIT_BLOCKSIZE / WSIZE);
     // printf("+++++++++++++++++MM_INIT EXECUTED+++++++++++++++\n");
@@ -127,12 +136,44 @@ void *expand_heap(size_t words){
     PUT_ADDR(HDRP(bp)+WSIZE, NULL); // set pred
     PUT_ADDR(HDRP(bp)+DSIZE, NULL); // set succ
     PUT(FTRP(bp)+WSIZE, PACK(0,1));
+
     bp =coalesce(bp);
     epilogue = FTRP(bp) + WSIZE;
+
 
     // printf("+++++++++++++++++HEAP EXPANDED+++++++++++++++\n");
     // mm_check();
     return bp;
+}
+
+/**
+ * Takes size of block and returns int of bucker number.
+ * Get the bucket number for size of block.
+*/
+int get_bucket(size_t size){
+    size--;
+    for( int i=0; i<6; i++){
+        size |= size >> (1 << i);
+    }
+    size++;
+    return (log(size)/log(2));
+}
+
+/**
+ * Takes bucket_num and bp. Put the free block into the
+ * bucket of its class size by adding to the front of the linked list.
+ * 
+*/
+void put_bucket(int bucket_num, void *bp){
+    // printf("bucket_num: %d, bp: %p\n", bucket_num,bp);
+    void *start = GET_START(bucket_num);
+    if(start != NULL){
+        PUT_ADDR(PRED(start), bp);
+    }
+    bucket[bucket_num] = bp;
+    PUT_ADDR(PRED(bp), NULL);
+    PUT_ADDR(SUCC(bp), start);
+
 }
 
 /*
@@ -147,7 +188,8 @@ void *coalesce(void *bp){
 
 
     if(prev_alloc && next_alloc){
-        return link_to_root(bp);
+        put_bucket(get_bucket(GET_SIZE(HDRP(bp))),bp);
+        return bp;
     }
 
     if(!prev_alloc && next_alloc){// left block is free
@@ -156,12 +198,15 @@ void *coalesce(void *bp){
         splice(PREV_BLK(bp));
 
         size_t newsize = GET_SIZE(HDRP(bp)) + GET_SIZE(HDRP(PREV_BLK(bp))); 
+        // printf("newsize : %ut\n", newsize);
         
         // Change footer and header(size & alloc)
         PUT(HDRP(PREV_BLK(bp)), PACK(newsize, 0));
         PUT(FTRP(PREV_BLK(bp)), PACK(newsize,0));
 
-        return link_to_root(PREV_BLK(bp));
+        put_bucket(get_bucket(newsize), PREV_BLK(bp));
+
+        return PREV_BLK(bp);
     }
 
     if(prev_alloc && !next_alloc){ // right block is free
@@ -174,8 +219,9 @@ void *coalesce(void *bp){
         PUT(HDRP(bp), PACK(newsize, 0));
         PUT(FTRP(bp), PACK(newsize,0));
 
-    
-        return link_to_root(bp);
+        put_bucket(get_bucket(newsize), bp);
+
+        return bp;
     }
 
     if(!prev_alloc && !next_alloc){ // both left and right blocks are free
@@ -190,7 +236,9 @@ void *coalesce(void *bp){
         PUT(HDRP(PREV_BLK(bp)), PACK(newsize,0));
         PUT(FTRP(PREV_BLK(bp)), PACK(newsize,0));
 
-        return link_to_root(PREV_BLK(bp));
+        put_bucket(get_bucket(newsize), PREV_BLK(bp));
+
+        return PREV_BLK(bp);
     }
 }
 
@@ -199,32 +247,45 @@ void *coalesce(void *bp){
  * Connect SUCC to root's SUCC and PRED to root -> Connect root's SUCC to bp -> 
  * Connect succ's PRED to bp (if succ exist).
 */
-void *link_to_root(void *bp){
+// void *link_to_root(void *bp){
 
-    PUT_ADDR(SUCC(bp),GET_ADDR(SUCC(root))); // connect succ of current block to the succ of root.
-    PUT_ADDR(PRED(bp), root);// connect pred of current block to root.
-    PUT_ADDR(SUCC(root), bp);// connect succ of root to current block
+//     PUT_ADDR(SUCC(bp),GET_ADDR(SUCC(root))); // connect succ of current block to the succ of root.
+//     PUT_ADDR(PRED(bp), root);// connect pred of current block to root.
+//     PUT_ADDR(SUCC(root), bp);// connect succ of root to current block
 
-    if(GET_ADDR(SUCC(bp)) != NULL){
-        // if exist, connect the pred of current block succ to current block.
-        PUT_ADDR(PRED(GET_ADDR(SUCC(bp))), bp); 
-    }
+//     if(GET_ADDR(SUCC(bp)) != NULL){
+//         // if exist, connect the pred of current block succ to current block.
+//         PUT_ADDR(PRED(GET_ADDR(SUCC(bp))), bp); 
+//     }
 
-    return bp;
-}
+//     return bp;
+// }
 
 /**
  * Takes a block pointer to block in the linked list and splice it (free the block from linked list).
 */
 void splice(void *bp){
-    if(GET_ADDR(PRED(bp)) != NULL){
-        // Point pred to succ
-        PUT_ADDR(SUCC(GET_ADDR(PRED(bp))),GET_ADDR(SUCC(bp)));
+    int bucket_number  = get_bucket(GET_SIZE(HDRP(bp)));
+    if(GET_START(bucket_number) != bp){ // is not root
+
+        if(GET_ADDR(PRED(bp)) != NULL){
+            // Point pred to succ
+            PUT_ADDR(SUCC(GET_ADDR(PRED(bp))),GET_ADDR(SUCC(bp)));
+        }
+        if(GET_ADDR(SUCC(bp)) != NULL){
+            //Point succ to pred
+            PUT_ADDR(PRED(GET_ADDR(SUCC(bp))), GET_ADDR(PRED(bp)));
+        }
+    }else{
+        bucket[bucket_number] = GET_ADDR(SUCC(bp));
+
+        if(GET_ADDR(SUCC(bp)) != NULL){
+            PUT_ADDR(PRED(GET_ADDR(SUCC(bp))), NULL);
+        }
+
     }
-    if(GET_ADDR(SUCC(bp)) != NULL){
-        //Point succ to pred
-        PUT_ADDR(PRED(GET_ADDR(SUCC(bp))), GET_ADDR(PRED(bp)));
-    }
+    PUT_ADDR(SUCC(bp), NULL);
+    PUT_ADDR(PRED(bp), NULL);
 }
 
 
@@ -238,7 +299,9 @@ void splice(void *bp){
 void *mm_malloc(size_t size)
 
 {
+
     size_t asize = ALIGN(size) + DSIZE*2; // Aligned-size + hrd + ftr + pred + succ
+    // printf("size to malloc : %ut\n", asize);
     void *bfp = find(asize); // Find best-fit block and assigned the pointer to payload to bfp.
     
     /**
@@ -268,6 +331,7 @@ void *mm_malloc(size_t size)
      */
 
     size_t remaining = GET_SIZE(HDRP(bfp)) - asize;
+    // printf("bfp_size: %ut, asize: %ut, remaining : %ut\n",GET_SIZE(HDRP(bfp)) ,asize,remaining);
 
     /**
      * If the remainder is not a valid block, just allocate the remainder as well.
@@ -277,6 +341,10 @@ void *mm_malloc(size_t size)
             asize = GET_SIZE(HDRP(bfp)); 
             remaining = 0;
     }
+
+    splice(bfp);
+    // printf("************************ AFTER SPLICE *************\n");
+    // mm_check();
 
     // Rewrite the header and footer with new block size.
     PUT(HDRP(bfp), PACK(asize,1));
@@ -289,23 +357,11 @@ void *mm_malloc(size_t size)
         PUT(FTRP(NEXT_BLK(bfp)), PACK(remaining,0));
         
         // Re-link pred and succ to the remaining free block.
-        PUT(PRED(NEXT_BLK(bfp)), GET_ADDR(PRED(bfp)));
-        PUT(SUCC(NEXT_BLK(bfp)), GET_ADDR(SUCC(bfp)));
-
-        if(GET_ADDR(PRED(bfp)) != NULL){
-            // If the predecessor is not null, point succ of the predecessor to free block
-            PUT(SUCC(GET_ADDR(PRED(bfp))), NEXT_BLK(bfp));
-        }
-
-        if(GET_ADDR(SUCC(bfp)) != NULL){
-            // If the successor is not null, point pred of the successor to free block
-            PUT(PRED(GET_ADDR(SUCC(bfp))), NEXT_BLK(bfp));
-        }
-    }else{
-        splice(bfp);
+        put_bucket(get_bucket(remaining), NEXT_BLK(bfp));
     }
-    PUT_ADDR(SUCC(bfp), NULL);
-    PUT_ADDR(PRED(bfp), NULL);
+
+    // printf("+++++++++++++++++MM_MALLOC %ut+++++++++++++++\n", asize);
+    // mm_check();
 
     return bfp;
 }
@@ -315,17 +371,26 @@ void *mm_malloc(size_t size)
  * a pointer to the start of payload.
 */
 void *find(size_t asize){
-    void *bp = GET_ADDR(SUCC(root));//Frist free payload 
     void *bfp = NULL; // Payload of best-fit block
-
+    // printf("bucket to looked at : %d\n",get_bucket(asize));
     //Find best-fit block by looping till no more free block
-    while(bp != NULL){
-        if(GET_SIZE(HDRP(bp)) >= asize){ // Check big enough
-            if(bfp == NULL || GET_SIZE(HDRP(bp)) < GET_SIZE(HDRP(bfp))){ // Check if the block is smaller than current best
-                bfp = bp;
+    for (int bucket_num = get_bucket(asize); bucket_num < 64; bucket_num++){
+
+        void *bp = GET_START(bucket_num);
+
+        while(bp != NULL){
+            if(GET_SIZE(HDRP(bp)) >= asize){ // Check big enough
+
+                // Check if the block is smaller than current best
+                if(bfp == NULL || GET_SIZE(HDRP(bp)) < GET_SIZE(HDRP(bfp))){
+                    bfp = bp;
+                }
             }
+            bp = GET_ADDR(SUCC(bp));// Point to next free payload
         }
-        bp = GET_ADDR(SUCC(bp));// Point to next free payload
+        if(bfp != NULL){
+            break;
+        }
     }
 
     return bfp;
@@ -336,6 +401,7 @@ void *find(size_t asize){
  */
 void mm_free(void *bp)
 {
+    // mm_check();    
     // printf("----------------FREE %p------------\n", bp);
     PUT(HDRP(bp), PACK(GET_SIZE(HDRP(bp)), 0));
     PUT(FTRP(bp), PACK(GET_SIZE(HDRP(bp)), 0));
@@ -348,37 +414,58 @@ void mm_free(void *bp)
  */
 void *mm_realloc(void *ptr, size_t size)
 {
-    void *oldptr = ptr;
-    void *newptr;
-    size_t copySize;
-    
-    newptr = mm_malloc(size);
-    if (newptr == NULL)
-      return NULL;
-    copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
-    if (size < copySize)
-      copySize = size;
-    memcpy(newptr, oldptr, copySize);
-    mm_free(oldptr);
+
+    if(ptr == NULL){
+        return mm_malloc(size);
+    }
+    if(size == 0){
+        mm_free(ptr);
+        return ptr;
+    }
+
+
+    size_t copySize = size < GET_SIZE(HDRP(ptr)) ? size : GET_SIZE(HDRP(ptr));
+    void *newptr=  mm_malloc(size);
+    // printf("SIZE: %ut, COPYSIZE: %ut, newptr: %p\n", size, copySize, newptr);
+    memcpy(newptr, ptr, copySize);
+    mm_free(ptr);
+    // printf("After--------------------------\n");
+    // mm_check();
     return newptr;
 }
 
 /*
  * Checker 
 */
-void mm_check(){
+void print_heap(){
     printf("====================================================================\n");
-    void *p = HDRP(root);
-    void *bp = root;
-    printf("Root Header : %p, Root Payload: %p ,Size: %ut, Flag: %d, Pred: %p, Succ %p\n",p,bp,GET_SIZE(HDRP(bp)),
+    void *p = HDRP(prologue);
+    void *bp = prologue;
+    printf("Prologue : %p, Prologue Payload: %p ,Size: %ut, Flag: %d, Pred: %p, Succ %p\n",p,bp,GET_SIZE(HDRP(bp)),
     GET_ALLOC(HDRP(bp)), GET_ADDR(PRED(bp)), GET_ADDR(SUCC(bp)));
     p = FTRP(bp) + WSIZE;
     while(GET(p) != PACK(0,1)){
         bp = p + 3*WSIZE;
-        printf("Header : %p, Payload : %p, Size: %ut, Flag: %d, Pred: %p, Succ %p\n",p,bp,GET_SIZE(HDRP(bp)),
+        printf("Bucket : %d, Payload : %p, Size: %ut, Flag: %d, Pred: %p, Succ %p\n",get_bucket(GET_SIZE(HDRP(bp))),bp,GET_SIZE(HDRP(bp)),
     GET_ALLOC(HDRP(bp)), GET_ADDR(PRED(bp)), GET_ADDR(SUCC(bp)));
         p = FTRP(bp) + WSIZE;
     }
     printf("Epilogue : %p, Size: %ut, Flag: %d\n",p,GET_SIZE(p),GET_ALLOC(p));
+
+    for (int b=0; b<64; b++){
+        if(GET_START(b) != NULL){
+            printf("Bucket NO: %d, Start: %p\n", b,GET_START(b));
+        }
+    }
+
     printf("====================================================================\n");
 }
+
+void mm_check(){
+
+    //----------------------------BLOCK LEVEL------------------------------
+
+    
+}
+
+
