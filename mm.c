@@ -299,7 +299,6 @@ void splice(void *bp){
 void *mm_malloc(size_t size)
 
 {
-
     size_t asize = ALIGN(size) + DSIZE*2; // Aligned-size + hrd + ftr + pred + succ
     // printf("size to malloc : %ut\n", asize);
     void *bfp = find(asize); // Find best-fit block and assigned the pointer to payload to bfp.
@@ -360,8 +359,9 @@ void *mm_malloc(size_t size)
         put_bucket(get_bucket(remaining), NEXT_BLK(bfp));
     }
 
-    // printf("+++++++++++++++++MM_MALLOC %ut+++++++++++++++\n", asize);
-    // mm_check();
+    //printf("+++++++++++++++++MM_MALLOC %ut+++++++++++++++\n", asize);
+    //print_heap();
+    //mm_check();
 
     return bfp;
 }
@@ -402,11 +402,12 @@ void *find(size_t asize){
 void mm_free(void *bp)
 {
     // mm_check();    
-    // printf("----------------FREE %p------------\n", bp);
+    //printf("----------------FREE %p------------\n", bp);
     PUT(HDRP(bp), PACK(GET_SIZE(HDRP(bp)), 0));
     PUT(FTRP(bp), PACK(GET_SIZE(HDRP(bp)), 0));
     coalesce(bp);
-    // mm_check();
+    //print_heap();
+    //mm_check();
 }
 
 /*
@@ -465,7 +466,112 @@ void mm_check(){
 
     //----------------------------BLOCK LEVEL------------------------------
 
+    int hdr_n_ftr_match = 1;
+    int palign = 1;
+    int svalid = 1;
+    int no_cont_fblk = 1;
+    int in_heap = 1;
+
+
+    // HEADER AND FOOTER VALUE MATCHES.
+    // PAYLOAD AREA IS ALIGN AND SIZE IS VALID.
+
+    void *bp = prologue;
+    void *header = HDRP(bp);
+    void *heap_start = prologue - WSIZE*4;
+    void *heap_end = epilogue;
+
+    while(GET(header) != PACK(0,1)){
+        if(GET(FTRP(bp)) != GET(HDRP(bp))){
+            
+            hdr_n_ftr_match = 0;
+            break;
+        }
+        if((unsigned int)bp % 8 != 0){
+            palign = 0;
+            break;
+        }
+        if( GET_SIZE(HDRP(bp))% 8 != 0){
+            svalid = 0;
+            break;
+        }
+        if( GET_ALLOC(HDRP(bp)) == 0 && (GET_ALLOC(HDRP(NEXT_BLK(bp))) == 0 || GET_ALLOC(HDRP(PREV_BLK(bp))) == 0) ){
+            no_cont_fblk = 0;
+            break;
+        }
+        if(bp > heap_end || bp < heap_start){
+            in_heap = 0;
+        }
+        bp =  NEXT_BLK(bp);
+        header = HDRP(bp);
+    }
+
+    if(!hdr_n_ftr_match){
+        printf("ERROR: HEADER AND FOOTER DOESNT MATCH\n");
+    }
+
+    if(!palign){
+        printf("ERROR: PAYLOAD IS NOT ALIGNED\n");
+    }
     
+    if(!svalid){
+        printf("ERROR: PAYLOAD SIZE IS INVALID\n");
+    }
+
+    if(!no_cont_fblk){
+        printf("ERROR: THERE IS CONTINUOS FREE BLK\n");
+    }
+
+    if(!in_heap){
+        printf("ERROR: BLOCK ARE NOT IN HEAP BOUNDARY");
+    }
+
+    //-------------------LIST LEVEL----------------------
+
+    int p_consistent = 1;
+    int all_free =1;
+    int fit_bucket = 1;
+    
+    for(int b=0; b<64; b++){
+        size_t max_size = pow(2,b);
+        size_t min_size = b > 0 ? pow(2,b-1) : 0;
+        void *prev = NULL;
+        bp = GET_START(b);
+        while(bp != NULL){
+            if(GET_ADDR(SUCC(bp)) != NULL){
+                if(GET_ADDR(PRED(SUCC(bp))) != bp){
+                    p_consistent = 0;
+                    break;
+                }
+            }
+            if(GET_ALLOC(HDRP(bp)) == 1){
+                all_free = 0;
+                break;
+            }
+            size_t size = GET_SIZE(HDRP(bp));
+            if(size > max_size || size < min_size){
+                fit_bucket = 0;
+                break;
+            }
+
+            bp = GET_ADDR(SUCC(bp));
+        }
+        if(!p_consistent || !all_free || !fit_bucket){
+            break;
+        }
+        
+    }
+
+    if(!p_consistent){
+        printf("ERROR: NEXT/PREV POINTER IN FREE BLOCKS ARE NOT CONSISTENT\n");
+    }
+    if(!all_free){
+        printf("ERROR: NOT ALL BLOCK IN LIST ARE FREED\n");
+    }
+    if(!fit_bucket){
+        printf("ERROR: BLOCK DOESNT BELONG TO THE CORRECT SIZE CLASS\n");
+    }
+
 }
 
 
